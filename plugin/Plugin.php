@@ -19,7 +19,7 @@ if (!defined('pluginName')) {
 }
 
 /**
- * 支持上传文件到Cloudflare R2的Typeecho插件
+ * 支持上传文件到Cloudflare R2的Typecho插件
  *
  * @package CloudflareR2Typecho
  * @author DeerShark
