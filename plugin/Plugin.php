@@ -11,12 +11,12 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
 }
 
 /**
- * %description%
+ * 支持上传文件到Cloudflare R2的Typeecho插件
  *
- * @package %name%
- * @author %author%
+ * @package CloudflareR2Typecho
+ * @author DeerShark
  * @version %version%
- * @link %link%
+ * @link https://github.com/DeerShark/CloudflareR2Typecho
  */
 class Plugin implements PluginInterface
 {
