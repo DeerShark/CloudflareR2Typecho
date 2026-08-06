@@ -10,72 +10,71 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+      GIT_TERMINAL_PROMPT: '0'
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.2'
-
-      - name: Get Plugin Name
-        id: plugin-name
+      - name: Checkout release tag
         run: |
           set -euo pipefail
-          php -r '
-          $tokens = token_get_all(file_get_contents("./plugin/Plugin.php"));
-          $announced = false;
-          $namespace = "";
-          foreach ($tokens as $token) {
-            if (!is_array($token)) {
-                continue;
-            }
-            if (!$announced && $token[0] === T_NAMESPACE) {
-                $announced = true;
-                continue;
-            } elseif ($announced && $token[0] === T_NAME_QUALIFIED) {
-                $namespace = $token[1];
-                break;
-            }
-          }
-          if (empty($namespace)) {
-            echo "Cannot find namespace in Plugin.php";
-            exit(1);
-          }
-          $names = explode("\\", $namespace);
-          echo "plugin_name=" . array_pop($names) . PHP_EOL;
-          ' >> "$GITHUB_OUTPUT"
+          : "${RELEASE_TAG:?release_tag is required}"
 
-      - name: Extract version number
-        id: extract-version
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+            fetch --depth=1 --no-tags origin \
+            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git checkout --detach "refs/tags/${RELEASE_TAG}"
+
+      - name: Check release and tools
         run: |
           set -euo pipefail
-          php -r '
+          command -v php
+          command -v zip
+          command -v gh
+          php --version
+          php -l plugin/Plugin.php
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+      - name: Build plugin
+        id: build
+        run: |
+          set -euo pipefail
+
+          plugin_name="$(php -r '
+          $contents = file_get_contents("./plugin/Plugin.php");
+          if ($contents === false || !preg_match("/^\s*namespace\s+([^;]+);/m", $contents, $matches)) {
+              fwrite(STDERR, "Cannot find namespace in Plugin.php" . PHP_EOL);
+              exit(1);
+          }
+          $names = explode(chr(92), trim($matches[1]));
+          $pluginName = end($names);
+          if (!preg_match("/^[A-Za-z_][A-Za-z0-9_]*$/", $pluginName)) {
+              fwrite(STDERR, "Invalid plugin name" . PHP_EOL);
+              exit(1);
+          }
+          echo $pluginName;
+          ')"
+
+          version="$(php -r '
           $tag = getenv("RELEASE_TAG");
           if (preg_match("/^v?((?:\d+\.)*\d+)$/", $tag, $matches)) {
-            echo "version=" . $matches[1] . PHP_EOL;
-          } else {
-            fwrite(STDERR, "Cannot extract version number from tag" . PHP_EOL);
-            exit(1);
-          }' >> "$GITHUB_OUTPUT"
+              echo $matches[1];
+              exit(0);
+          }
+          fwrite(STDERR, "Cannot extract version number from tag" . PHP_EOL);
+          exit(1);
+          ')"
 
-      - name: Zip Plugin
-        id: zip-plugin
-        run: |
-          set -euo pipefail
-          plugin_name='${{ steps.plugin-name.outputs.plugin_name }}'
-          version='${{ steps.extract-version.outputs.version }}'
           plugin_zip="${plugin_name}-${version}.zip"
-
           sed -i "s/%version%/${version}/g" ./plugin/Plugin.php
           if grep -q '%version%' ./plugin/Plugin.php; then
             echo 'Version placeholder was not replaced' >&2
@@ -86,11 +85,9 @@ jobs:
           zip -rq "$plugin_zip" "$plugin_name"
           echo "plugin_zip=$plugin_zip" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Plugin To Release
+      - name: Upload plugin to release
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-          ASSET_PATH: ${{ steps.zip-plugin.outputs.plugin_zip }}
+          ASSET_PATH: ${{ steps.build.outputs.plugin_zip }}
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" "$ASSET_PATH" \
