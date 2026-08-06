@@ -3,6 +3,12 @@ name: Release Plugin
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '要发布的 Git tag，例如 v1.2.3'
+        required: true
+        type: string
 
 jobs:
   release:
@@ -12,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -50,7 +56,7 @@ jobs:
       - name: Extract version number
         id: extract-version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: |
           set -euo pipefail
           php -r '
@@ -83,7 +89,7 @@ jobs:
       - name: Upload Plugin To Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
           ASSET_PATH: ${{ steps.zip-plugin.outputs.plugin_zip }}
         run: |
           set -euo pipefail
