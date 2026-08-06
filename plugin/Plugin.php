@@ -262,15 +262,21 @@ class Plugin implements PluginInterface
 
     /**
      * @description: 获取对象访问Url
-     * @param {array} $content
-     * @return {*}
+     *
+     * Typecho 1.3 passes the attachment as a Config object, while older
+     * versions pass the contents row as an array.
+     *
+     * @param \Typecho\Config|array $content
+     * @return string
      */
-    public static function attachmentHandle(array $content)
+    public static function attachmentHandle($content)
     {
         #获取设置参数
         $opt = Options::alloc()->plugin(pluginName);
-        $url = "https://" . $opt->access_domain . "/" . $content['attachment']->path;
-        return $url;
+        $path = $content instanceof \Typecho\Config
+            ? $content->path
+            : $content['attachment']->path;
+        return "https://" . $opt->access_domain . "/" . $path;
     }
 
 
