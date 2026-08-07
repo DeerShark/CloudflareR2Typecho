@@ -1,95 +1,116 @@
-name: Release Plugin
+name: Release Typecho plugin
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: '要发布的 Git tag，例如 v1.2.3'
+      version:
+        description: "Release version, for example 1.0.0"
         required: true
         type: string
+      draft:
+        description: "Create the GitHub Release as a draft"
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
   release:
+    name: Package and publish plugin
     runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
-      GH_TOKEN: ${{ github.token }}
-      GIT_TERMINAL_PROMPT: '0'
 
     steps:
-      - name: Checkout release tag
-        run: |
-          set -euo pipefail
-          : "${RELEASE_TAG:?release_tag is required}"
+      - name: Check out selected ref
+        uses: actions/checkout@v4
 
-          git init .
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
-            fetch --depth=1 --no-tags origin \
-            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
-          git checkout --detach "refs/tags/${RELEASE_TAG}"
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.1"
+          coverage: none
 
-      - name: Check release and tools
-        run: |
-          set -euo pipefail
-          command -v php
-          command -v zip
-          command -v gh
-          php --version
-          php -l plugin/Plugin.php
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
-
-      - name: Build plugin
-        id: build
+      - name: Validate and package plugin
+        id: package
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
-          plugin_name="$(php -r '
-          $contents = file_get_contents("./plugin/Plugin.php");
-          if ($contents === false || !preg_match("/^\s*namespace\s+([^;]+);/m", $contents, $matches)) {
-              fwrite(STDERR, "Cannot find namespace in Plugin.php" . PHP_EOL);
-              exit(1);
-          }
-          $names = explode(chr(92), trim($matches[1]));
-          $pluginName = end($names);
-          if (!preg_match("/^[A-Za-z_][A-Za-z0-9_]*$/", $pluginName)) {
-              fwrite(STDERR, "Invalid plugin name" . PHP_EOL);
-              exit(1);
-          }
-          echo $pluginName;
-          ')"
-
-          version="$(php -r '
-          $tag = getenv("RELEASE_TAG");
-          if (preg_match("/^v?((?:\d+\.)*\d+)$/", $tag, $matches)) {
-              echo $matches[1];
-              exit(0);
-          }
-          fwrite(STDERR, "Cannot extract version number from tag" . PHP_EOL);
-          exit(1);
-          ')"
-
-          plugin_zip="${plugin_name}-${version}.zip"
-          sed -i "s/%version%/${version}/g" ./plugin/Plugin.php
-          if grep -q '%version%' ./plugin/Plugin.php; then
-            echo 'Version placeholder was not replaced' >&2
+          version="${INPUT_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must use semantic version format, for example 1.0.0 or 1.0.0-beta.1" >&2
             exit 1
           fi
 
-          cp -R -- plugin "$plugin_name"
-          zip -rq "$plugin_zip" "$plugin_name"
-          echo "plugin_zip=$plugin_zip" >> "$GITHUB_OUTPUT"
+          test -f plugin/Plugin.php
+          test -f plugin/vendor/aws/aws-autoloader.php
+          php -l plugin/Plugin.php
 
-      - name: Upload plugin to release
+          package_root="$RUNNER_TEMP/plugin-release"
+          archive="$RUNNER_TEMP/CloudflareR2Plugin-${version}.zip"
+          checksum="${archive}.sha256"
+
+          rm -rf "$package_root"
+          mkdir -p "$package_root/CloudflareR2Plugin"
+          cp -a plugin/. "$package_root/CloudflareR2Plugin/"
+
+          # Keep the source tree unchanged; inject the release version only into the archive.
+          sed -i "s/@version %version%/@version ${version}/" \
+            "$package_root/CloudflareR2Plugin/Plugin.php"
+          grep -Fq "@version ${version}" "$package_root/CloudflareR2Plugin/Plugin.php"
+
+          (
+            cd "$package_root"
+            zip -qr "$archive" CloudflareR2Plugin
+          )
+          (
+            cd "$(dirname "$archive")"
+            sha256sum "$(basename "$archive")" > "$(basename "$checksum")"
+          )
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify archive layout
+        shell: bash
         env:
-          ASSET_PATH: ${{ steps.build.outputs.plugin_zip }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" "$ASSET_PATH" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          unzip -Z1 "$ARCHIVE" | grep -Fxq "CloudflareR2Plugin/Plugin.php"
+          unzip -Z1 "$ARCHIVE" | grep -Fxq "CloudflareR2Plugin/vendor/aws/aws-autoloader.php"
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          DRAFT: ${{ inputs.draft }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          release_args=(
+            "$TAG"
+            --target "$GITHUB_SHA"
+            --title "CloudflareR2Typecho ${VERSION}"
+            --generate-notes
+          )
+
+          [[ "$DRAFT" == "true" ]] && release_args+=(--draft)
+          [[ "$PRERELEASE" == "true" ]] && release_args+=(--prerelease)
+
+          gh release create "${release_args[@]}" "$ARCHIVE" "$CHECKSUM"
